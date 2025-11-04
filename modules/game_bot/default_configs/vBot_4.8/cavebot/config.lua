@@ -16,6 +16,8 @@ CaveBot.Config.setup = function()
   add("ignoreFields", "Ignore fields", false)  
   add("skipBlocked", "Skip blocked path", false)  
   add("useDelay", "Delay after use", 400)
+  add("mlOptimizerEnabled", "Enable ML optimizer", false)
+  add("mlOptimizerRounds", "ML rounds per evaluation", 5)
 end
 
 CaveBot.Config.show = function()

@@ -20,6 +20,10 @@ for extension, callbacks in pairs(CaveBot.Extensions) do
   end
 end
 
+if CaveBot.MLOptimizer and CaveBot.MLOptimizer.bootstrap then
+  CaveBot.MLOptimizer.bootstrap({ list = ui.list })
+end
+
 -- main loop, controlled by config
 local actionRetries = 0
 local prevActionResult = true
@@ -74,11 +78,17 @@ cavebotMacro = macro(20, function()
     actionRetries = 0
     prevActionResult = true
   end
-  local nextAction = ui.list:getChildIndex(currentAction) + 1
-  if nextAction > actions then
-    nextAction = 1
-  end
-  ui.list:focusChild(ui.list:getChildByIndex(nextAction))
+    local nextAction = ui.list:getChildIndex(currentAction) + 1
+    local completedRound = false
+    if nextAction > actions then
+      nextAction = 1
+      completedRound = true
+    end
+    ui.list:focusChild(ui.list:getChildByIndex(nextAction))
+
+    if completedRound and CaveBot.MLOptimizer and CaveBot.MLOptimizer.onRoundComplete then
+      CaveBot.MLOptimizer.onRoundComplete()
+    end
 end)
 
 -- config, its callback is called immediately, data can be nil
@@ -130,13 +140,16 @@ config = Config.setup("cavebot_configs", configWidget, "cfg", function(name, ena
   actionRetries = 0
   CaveBot.resetWalking()
   prevActionResult = true
-  cavebotMacro.setOn(enabled)
-  cavebotMacro.delay = nil
-  if lastConfig == name then 
-    -- restore focused child on the action list
-    ui.list:focusChild(ui.list:getChildByIndex(currentActionIndex))
-  end
-  lastConfig = name  
+    cavebotMacro.setOn(enabled)
+    cavebotMacro.delay = nil
+    if lastConfig == name then 
+      -- restore focused child on the action list
+      ui.list:focusChild(ui.list:getChildByIndex(currentActionIndex))
+    end
+    lastConfig = name  
+    if CaveBot.MLOptimizer and CaveBot.MLOptimizer.onProfileLoaded then
+      CaveBot.MLOptimizer.onProfileLoaded(name)
+    end
 end)
 
 -- ui callbacks
@@ -440,6 +453,9 @@ CaveBot.save = function()
   end
   table.insert(data, {"extensions", json.encode(extension_data, 2)})
   config.save(data)
+  if CaveBot.MLOptimizer and CaveBot.MLOptimizer.onRouteSaved then
+    CaveBot.MLOptimizer.onRouteSaved()
+  end
 end
 
 CaveBotList = function()
