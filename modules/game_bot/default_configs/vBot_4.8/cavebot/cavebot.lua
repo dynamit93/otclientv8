@@ -8,6 +8,33 @@ local ui = UI.createWidget("CaveBotPanel")
 ui.list = ui.listPanel.list -- shortcut
 CaveBot.actionList = ui.list
 
+CaveBot.roundCounter = 0
+CaveBot.lastRoundDuration = 0
+
+local function callExtensionHook(hookName, ...)
+  for extension, callbacks in pairs(CaveBot.Extensions) do
+    local handler = callbacks[hookName]
+    if type(handler) == "function" then
+      local ok, err = pcall(handler, ...)
+      if not ok then
+        warn(string.format("[CaveBot] extension '%s'.%s failed: %s", extension, hookName, err))
+      end
+    end
+  end
+end
+
+local roundCount = 0
+local roundStartTime = nil
+
+local function resetRoundTracking()
+  roundCount = 0
+  roundStartTime = nil
+  CaveBot.roundCounter = 0
+  CaveBot.lastRoundDuration = 0
+end
+
+resetRoundTracking()
+
 if CaveBot.Editor then
   CaveBot.Editor.setup()
 end
@@ -75,10 +102,27 @@ cavebotMacro = macro(20, function()
     prevActionResult = true
   end
   local nextAction = ui.list:getChildIndex(currentAction) + 1
+  local roundCompleted = false
   if nextAction > actions then
     nextAction = 1
+    roundCompleted = true
   end
   ui.list:focusChild(ui.list:getChildByIndex(nextAction))
+
+  if roundCompleted then
+    if not roundStartTime then
+      roundStartTime = now
+    end
+    roundCount = roundCount + 1
+    CaveBot.roundCounter = roundCount
+    local elapsed = 0
+    if roundStartTime then
+      elapsed = math.max(0, now - roundStartTime)
+    end
+    roundStartTime = now
+    CaveBot.lastRoundDuration = elapsed
+    callExtensionHook("onRoundComplete", roundCount, elapsed)
+  end
 end)
 
 -- config, its callback is called immediately, data can be nil
@@ -92,6 +136,7 @@ config = Config.setup("cavebot_configs", configWidget, "cfg", function(name, ena
 
   local currentActionIndex = ui.list:getChildIndex(ui.list:getFocusedChild())
   ui.list:destroyChildren()
+  resetRoundTracking()
   if not data then return cavebotMacro.setOff() end
   
   local cavebotConfig = nil
@@ -417,6 +462,61 @@ CaveBot.gotoLabel = function(label)
     end
   end
   return false
+end
+
+function CaveBot.getActionSequence()
+  local sequence = {}
+  for _, child in ipairs(ui.list:getChildren()) do
+    table.insert(sequence, {action = child.action, value = child.value})
+  end
+  return sequence
+end
+
+function CaveBot.replaceActionSequence(sequence, opts)
+  if type(sequence) ~= "table" then
+    return false
+  end
+
+  opts = opts or {}
+  local focusIndex = opts.focusIndex
+
+  ui.list:destroyChildren()
+  local focusWidget = nil
+  for index, entry in ipairs(sequence) do
+    local actionName = entry.action
+    local actionValue = entry.value
+    if actionName and actionValue then
+      local widget = CaveBot.addAction(actionName, actionValue)
+      if focusIndex and index == focusIndex then
+        focusWidget = widget
+      end
+    end
+  end
+
+  if focusWidget and focusWidget.focus then
+    focusWidget:focus()
+  else
+    local first = ui.list:getFirstChild()
+    if first and first.focus then
+      first:focus()
+    end
+  end
+
+  if opts.ensureVisible and focusWidget then
+    ui.list:ensureChildVisible(focusWidget)
+  end
+
+  if opts.save ~= false then
+    CaveBot.save()
+  end
+
+  if opts.resetWalking ~= false then
+    CaveBot.resetWalking()
+  end
+
+  resetRoundTracking()
+
+  return true
 end
 
 CaveBot.save = function()
