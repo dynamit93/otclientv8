@@ -208,42 +208,604 @@ Panel
     return false
   end
 
+  local function splitLines(str)
+    local lines = {}
+    if not str or str == "" then
+      return lines
+    end
+    for line in (str .. "\n"):gmatch("([^\n]*)\n") do
+      table.insert(lines, line)
+    end
+    if #lines > 0 and lines[#lines] == "" then
+      table.remove(lines, #lines)
+    end
+    return lines
+  end
+
+  local function splitConfigText(config)
+    if not config or config:len() == 0 then
+      return "", ""
+    end
+    local lines = splitLines(config)
+    local firstCommandIndex = nil
+    for idx, line in ipairs(lines) do
+      local colonPos = line:find(":")
+      if colonPos then
+        local commandName = line:sub(1, colonPos - 1):lower()
+        if isValidCommand(commandName) then
+          firstCommandIndex = idx
+          break
+        end
+      end
+    end
+    if not firstCommandIndex then
+      return config, ""
+    end
+    local headerLines = {}
+    for i = 1, firstCommandIndex - 1 do
+      table.insert(headerLines, lines[i])
+    end
+    local bodyLines = {}
+    for i = firstCommandIndex, #lines do
+      table.insert(bodyLines, lines[i])
+    end
+    return table.concat(headerLines, "\n"), table.concat(bodyLines, "\n")
+  end
+
+  local function parseCommandsBody(body)
+    local parsed = {}
+    if not body or body:len() == 0 then
+      return parsed
+    end
+    local matches = regexMatch(body, [[([^:^\n^\s]+)(:?)([^\n]*)]])
+    for i = 1, #matches do
+      local command = matches[i][2]
+      local hasColon = (matches[i][3] == ":")
+      if not hasColon or isValidCommand(command) then
+        local text = matches[i][4]
+        if hasColon then
+          table.insert(parsed, { command = command:lower(), text = text or "" })
+        elseif #parsed > 0 then
+          parsed[#parsed].text = parsed[#parsed].text .. "\n" .. (matches[i][1] or "")
+        end
+      end
+    end
+    return parsed
+  end
+
+  local function cloneCommandsList(source)
+    local cloned = {}
+    for i = 1, #source do
+      local entry = source[i]
+      cloned[i] = {
+        command = entry.command,
+        text = entry.text,
+      }
+    end
+    return cloned
+  end
+
+  local function resolveCommandText(commandName, value)
+    if value == nil then
+      return "", nil
+    end
+    local valueType = type(value)
+    if valueType == "string" or valueType == "number" then
+      return tostring(value), nil
+    end
+    if valueType ~= "table" then
+      return nil, "unsupported value type"
+    end
+
+    commandName = commandName and commandName:lower() or ""
+    local function extractPosition(tbl)
+      local pos = tbl.position or tbl.pos
+      local x = tbl.x or (pos and (pos.x or pos[1])) or tbl[1]
+      local y = tbl.y or (pos and (pos.y or pos[2])) or tbl[2]
+      local z = tbl.z or (pos and (pos.z or pos[3])) or tbl[3]
+      if x and y and z then
+        return tonumber(x), tonumber(y), tonumber(z)
+      end
+    end
+
+    if commandName == "goto" or commandName == "use" then
+      local x, y, z = extractPosition(value)
+      if not x then
+        return nil, "missing position for command " .. commandName
+      end
+      return string.format("%d,%d,%d", x, y, z), nil
+    elseif commandName == "usewith" then
+      local itemId = value.itemId or value.item or value.id or value[1]
+      if type(itemId) ~= "number" then
+        return nil, "missing itemId for usewith command"
+      end
+      local x, y, z = extractPosition(value)
+      if not x then
+        return nil, "missing position for usewith command"
+      end
+      return string.format("%d,%d,%d,%d", itemId, x, y, z), nil
+    elseif commandName == "wait" then
+      local duration = value.ms or value.milliseconds or value[1]
+      if not duration then
+        return nil, "missing duration for wait command"
+      end
+      return tostring(duration), nil
+    elseif commandName == "label" or commandName == "gotolabel" or commandName == "follow" or commandName == "say" or commandName == "npc" or commandName == "comment" then
+      local text = value.text or value[1]
+      if not text then
+        return nil, "missing text for " .. commandName .. " command"
+      end
+      return tostring(text), nil
+    elseif commandName == "function" then
+      local script = value.script or value[1]
+      if not script then
+        return nil, "missing script for function command"
+      end
+      return tostring(script), nil
+    end
+
+    return nil, "unsupported payload for command " .. commandName
+  end
+
+  local function normalizeCommandEntry(entry)
+    if type(entry) == "string" then
+      local colonPos = entry:find(":")
+      if not colonPos then
+        return { command = "comment", text = entry }
+      end
+      local commandName = entry:sub(1, colonPos - 1):lower()
+      local text = entry:sub(colonPos + 1)
+      if not isValidCommand(commandName) then
+        return nil, "invalid command " .. commandName
+      end
+      return { command = commandName, text = text }
+    elseif type(entry) == "table" then
+      local commandName = entry.command or entry[1]
+      if type(commandName) ~= "string" then
+        return nil, "missing command name"
+      end
+      commandName = commandName:lower()
+      if not isValidCommand(commandName) then
+        return nil, "invalid command " .. commandName
+      end
+      local text = entry.text or entry.value or entry.payload or entry[2]
+      local resolvedText, err = resolveCommandText(commandName, text)
+      if err then
+        return nil, err
+      end
+      return { command = commandName, text = resolvedText or "" }
+    end
+    return nil, "unsupported command entry type"
+  end
+
+  local function buildBodyFromCommands(commandList)
+    local lines = {}
+    for _, cmd in ipairs(commandList) do
+      local text = cmd.text or ""
+      local textLines = splitLines(text)
+      if #textLines == 0 then
+        table.insert(lines, cmd.command .. ":")
+      else
+        table.insert(lines, cmd.command .. ":" .. textLines[1])
+        for i = 2, #textLines do
+          table.insert(lines, textLines[i])
+        end
+      end
+    end
+    return table.concat(lines, "\n")
+  end
+
+  local function trimTrailingNewline(str)
+    if not str or str == "" then
+      return ""
+    end
+    if str:sub(-1) == "\n" then
+      return trimTrailingNewline(str:sub(1, -2))
+    end
+    return str
+  end
+
   local commands = {}
+  local lastKnownHeader = ""
+  if type(context.cavebot) ~= "table" then
+    context.cavebot = {}
+  end
+  if type(context.storage.cavebot.mlOptimizer) ~= "table" then
+    context.storage.cavebot.mlOptimizer = {}
+  end
+  local mlState = context.storage.cavebot.mlOptimizer
+  mlState.history = mlState.history or {}
+  mlState.roundsPerUpdate = mlState.roundsPerUpdate or 5
+  mlState.enabled = mlState.enabled or false
+  mlState.round = mlState.round or 0
+  mlState.maxHistory = mlState.maxHistory or 50
+  local optimizerOptions = {
+    roundsPerUpdate = mlState.roundsPerUpdate,
+    maxHistory = mlState.maxHistory or 50,
+  }
+  local registeredOptimizer = nil
+  local optimizerRunning = false
+  local roundStartExp = context.player and context.player:getExperience() or 0
+  local roundStartTime = context.now
+
+  local function clamp(value, minValue, maxValue)
+    if value < minValue then return minValue end
+    if value > maxValue then return maxValue end
+    return value
+  end
+
+  local function getActiveConfigText()
+    if not context.storage.cavebot.activeConfig then
+      return nil
+    end
+    return context.storage.cavebot.configs[context.storage.cavebot.activeConfig]
+  end
+
+  local function updateActiveConfigWithCommands(commandList, scrollDown)
+    local activeText = getActiveConfigText()
+    if not activeText then
+      return false, "no active config"
+    end
+    local header, _ = splitConfigText(activeText)
+    lastKnownHeader = header
+    local body = buildBodyFromCommands(commandList)
+    local newConfig = ""
+    header = trimTrailingNewline(header)
+    if header ~= "" then
+      if body ~= "" then
+        newConfig = header .. "\n" .. body
+      else
+        newConfig = header
+      end
+    else
+      newConfig = body
+    end
+    context.storage.cavebot.configs[context.storage.cavebot.activeConfig] = newConfig
+    refreshConfig(scrollDown)
+    return true
+  end
+
+  local function applyOperations(operations, options)
+    if type(operations) ~= "table" then
+      return false, "operations must be a table"
+    end
+    local working = cloneCommandsList(commands)
+
+    local function findLabelIndex(label)
+      for idx, entry in ipairs(working) do
+        if entry.command == "label" and entry.text == label then
+          return idx
+        end
+      end
+      return nil
+    end
+
+    local function performOperation(op)
+      if type(op) ~= "table" then
+        return false, "operation must be a table"
+      end
+      local opType = op.type or op.op or op.action
+      if type(opType) ~= "string" then
+        return false, "operation missing type"
+      end
+      opType = opType:lower()
+
+      if opType == "add" or opType == "insert" then
+        if not op.command then
+          return false, "add operation missing command"
+        end
+        local commandName = op.command:lower()
+        if not isValidCommand(commandName) then
+          return false, "invalid command " .. commandName
+        end
+        local value = op.text or op.value or op.payload or op.data
+        local resolvedText, err = resolveCommandText(commandName, value)
+        if err then
+          return false, err
+        end
+        local index = op.index or op.position
+        if index then
+          index = clamp(math.floor(index), 1, #working + 1)
+          table.insert(working, index, { command = commandName, text = resolvedText or "" })
+        else
+          table.insert(working, { command = commandName, text = resolvedText or "" })
+        end
+        return true
+      elseif opType == "remove" or opType == "delete" then
+        local index = op.index or op.position or op.at
+        if not index and op.label then
+          index = findLabelIndex(op.label)
+        end
+        if not index then
+          return false, "remove operation missing index"
+        end
+        index = math.floor(index)
+        if index < 1 or index > #working then
+          return false, "remove index out of range"
+        end
+        table.remove(working, index)
+        return true
+      elseif opType == "move" or opType == "reorder" then
+        local fromIndex = op.from or op.index or op.source
+        local toIndex = op.to or op.target or op.position
+        if not fromIndex or not toIndex then
+          return false, "move operation missing from/to"
+        end
+        fromIndex = clamp(math.floor(fromIndex), 1, #working)
+        toIndex = clamp(math.floor(toIndex), 1, #working)
+        if fromIndex == toIndex then
+          return true
+        end
+        local item = table.remove(working, fromIndex)
+        table.insert(working, toIndex, item)
+        return true
+      elseif opType == "update" or opType == "set" then
+        local index = op.index or op.position or op.at
+        if not index then
+          if op.label then
+            index = findLabelIndex(op.label)
+          end
+        end
+        if not index then
+          return false, "update operation missing index"
+        end
+        index = clamp(math.floor(index), 1, #working)
+        local entry = working[index]
+        if op.command then
+          local commandName = op.command:lower()
+          if not isValidCommand(commandName) then
+            return false, "invalid command " .. commandName
+          end
+          entry.command = commandName
+        end
+        if op.text ~= nil or op.value ~= nil or op.payload ~= nil or op.data ~= nil then
+          local value = op.text or op.value or op.payload or op.data
+          local resolvedText, err = resolveCommandText(entry.command, value)
+          if err then
+            return false, err
+          end
+          entry.text = resolvedText or ""
+        end
+        return true
+      end
+      return false, "unknown operation type " .. opType
+    end
+
+    for _, operation in ipairs(operations) do
+      local ok, err = performOperation(operation)
+      if not ok then
+        return false, err
+      end
+    end
+
+    return updateActiveConfigWithCommands(working, options and options.scrollDown)
+  end
+
+  local function setCommandsFromList(commandList, options)
+    if type(commandList) ~= "table" then
+      return false, "commands must be a table"
+    end
+    local normalized = {}
+    for i = 1, #commandList do
+      local cmdEntry, err = normalizeCommandEntry(commandList[i])
+      if not cmdEntry then
+        return false, err
+      end
+      table.insert(normalized, cmdEntry)
+    end
+    return updateActiveConfigWithCommands(normalized, options and options.scrollDown)
+  end
+
+  local function replaceActiveConfig(configText, options)
+    if not context.storage.cavebot.activeConfig then
+      return false, "no active config"
+    end
+    if type(configText) ~= "string" then
+      return false, "configText must be string"
+    end
+    context.storage.cavebot.configs[context.storage.cavebot.activeConfig] = configText
+    refreshConfig(options and options.scrollDown)
+    return true
+  end
+
+  local function copyHistory(history)
+    local cloned = {}
+    for i = 1, #history do
+      local item = history[i]
+      cloned[i] = {
+        round = item.round,
+        expGain = item.expGain,
+        durationMs = item.durationMs,
+        expPerHour = item.expPerHour,
+        timestamp = item.timestamp,
+        commandCount = item.commandCount,
+      }
+    end
+    return cloned
+  end
+
+  local function getCurrentExp()
+    if context.player and context.player.getExperience then
+      return context.player:getExperience()
+    end
+    return mlState.lastKnownExp or 0
+  end
+
+  local function getCurrentLevel()
+    if context.player and context.player.getLevel then
+      return context.player:getLevel()
+    end
+    return mlState.lastKnownLevel or 0
+  end
+
+  local function computeExpPerHour(expGain, durationMs)
+    if not durationMs or durationMs <= 0 then
+      return 0
+    end
+    return (expGain * 3600000) / durationMs
+  end
+
+  local function getPlayerExpPerHour()
+    if context.player and context.player.expSpeed then
+      return math.floor(context.player.expSpeed * 3600)
+    end
+    return 0
+  end
+
+  local function summariseHistory()
+    local totalExp = 0
+    local totalTime = 0
+    for _, entry in ipairs(mlState.history) do
+      totalExp = totalExp + (entry.expGain or 0)
+      totalTime = totalTime + (entry.durationMs or 0)
+    end
+    return totalExp, totalTime
+  end
+
+  local function runOptimizer(triggerEntry)
+    if not registeredOptimizer or optimizerRunning then
+      return
+    end
+    optimizerRunning = true
+    local snapshot = {
+      round = mlState.round,
+      trigger = triggerEntry,
+      commands = cloneCommandsList(commands),
+      history = copyHistory(mlState.history),
+      expPerHour = computeExpPerHour(select(1, summariseHistory()), select(2, summariseHistory())),
+      player = {
+        level = getCurrentLevel(),
+        experience = getCurrentExp(),
+        expPerHour = getPlayerExpPerHour(),
+        expSpeed = context.player and context.player.expSpeed or nil,
+      },
+      config = {
+        index = context.storage.cavebot.activeConfig,
+        name = context.storage.cavebot.activeConfig and getConfigName(context.storage.cavebot.configs[context.storage.cavebot.activeConfig]) or nil,
+        roundsPerUpdate = optimizerOptions.roundsPerUpdate,
+        commandCount = #commands,
+      },
+      timestamp = context.now,
+      state = mlState.userState,
+    }
+
+    local status, result = pcall(registeredOptimizer, snapshot)
+    optimizerRunning = false
+
+    if not status then
+      context.error("Waypoint optimizer error: " .. tostring(result))
+      mlState.enabled = false
+      return
+    end
+
+    if result == nil then
+      return
+    end
+
+    local applied = false
+    if type(result) == "string" then
+      applied = replaceActiveConfig(result)
+    elseif type(result) == "table" then
+      if result.config then
+        applied = replaceActiveConfig(result.config, result.options)
+      elseif result.commands then
+        applied = setCommandsFromList(result.commands, result.options)
+      elseif result.operations then
+        local ok, err = applyOperations(result.operations, result.options)
+        if not ok and err then
+          context.error("Waypoint optimizer operations failed: " .. err)
+        end
+        applied = ok
+      end
+      if result.state ~= nil then
+        mlState.userState = result.state
+      end
+      if result.roundsPerUpdate then
+        optimizerOptions.roundsPerUpdate = math.max(1, math.floor(result.roundsPerUpdate))
+        mlState.roundsPerUpdate = optimizerOptions.roundsPerUpdate
+      end
+    end
+
+    if applied then
+      mlState.lastOptimizerRunRound = mlState.round
+      mlState.lastOptimizerRunAt = context.now
+      mlState.totalMutations = (mlState.totalMutations or 0) + 1
+    end
+  end
+
+  local function resetRoundTracking()
+    roundStartExp = getCurrentExp()
+    roundStartTime = context.now
+  end
+
+  local function onRoundComplete()
+    local currentExp = getCurrentExp()
+    local now = context.now
+    local expGain = currentExp - roundStartExp
+    local durationMs = now - roundStartTime
+    local expPerHour = computeExpPerHour(expGain, durationMs)
+
+    mlState.round = (mlState.round or 0) + 1
+    mlState.lastKnownExp = currentExp
+    mlState.lastKnownLevel = getCurrentLevel()
+
+    local roundEntry = {
+      round = mlState.round,
+      expGain = expGain,
+      durationMs = durationMs,
+      expPerHour = expPerHour,
+      timestamp = now,
+      commandCount = #commands,
+    }
+    table.insert(mlState.history, roundEntry)
+    local maxHistory = optimizerOptions.maxHistory or 50
+    while #mlState.history > maxHistory do
+      table.remove(mlState.history, 1)
+    end
+
+    resetRoundTracking()
+
+    if mlState.enabled and registeredOptimizer and optimizerOptions.roundsPerUpdate > 0 then
+      if (mlState.round % optimizerOptions.roundsPerUpdate) == 0 then
+        runOptimizer(roundEntry)
+      end
+    end
+  end
+
   local waitTo = 0
   local autoRecording = false
 
   local parseConfig = function(config)
     commands = {}
-    local matches = regexMatch(config, [[([^:^\n^\s]+)(:?)([^\n]*)]])
-    for i=1,#matches do
-      local command = matches[i][2]
-      local validation = (matches[i][3] == ":")
-      if not validation or isValidCommand(command) then      
-        local text = matches[i][4]
-        if validation then
-          table.insert(commands, {command=command:lower(), text=text})
-        elseif #commands > 0 then
-          commands[#commands].text = commands[#commands].text .. "\n" .. matches[i][1]
+    lastKnownHeader = ""
+    if not config or config:len() == 0 then
+      return
+    end
+
+    local header, body = splitConfigText(config)
+    lastKnownHeader = header or ""
+    commands = parseCommandsBody(body)
+
+    for i = 1, #commands do
+      commands[i].index = i
+      commands[i].text = commands[i].text or ""
+      local label = g_ui.createWidget("CaveBotLabel", ui.list)
+      if commands[i].command == "comment" then
+        label:setText(commands[i].text)
+        label:setColor("white")
+      else
+        label:setText(commands[i].command .. ":" .. commands[i].text)
+        if commands[i].command == "goto" then
+          label:setColor("green")
+        elseif commands[i].command == "label" then
+          label:setColor("yellow")
+        elseif commands[i].command == "use" or commands[i].command == "usewith" then
+          label:setColor("orange")
+        elseif commands[i].command == "gotolabel" then
+          label:setColor("red")
         end
       end
     end
-    
-    for i=1,#commands do
-      local label = g_ui.createWidget("CaveBotLabel", ui.list)
-      label:setText(commands[i].command .. ":" .. commands[i].text)
-      if commands[i].command == "goto" then
-        label:setColor("green")
-      elseif commands[i].command == "label" then
-        label:setColor("yellow")
-      elseif commands[i].command == "comment" then
-        label:setText(commands[i].text)
-        label:setColor("white")
-      elseif commands[i].command == "use" or commands[i].command == "usewith" then
-        label:setColor("orange")
-      elseif commands[i].command == "gotolabel" then
-        label:setColor("red")
-      end
-    end        
   end
   
   local ignoreOnOptionChange = true
@@ -273,12 +835,21 @@ Panel
        context.storage.cavebot.activeConfig = 1
     end
     
-    ui.list:destroyChildren()
-    
-    if context.storage.cavebot.activeConfig and context.storage.cavebot.configs[context.storage.cavebot.activeConfig] then
-      ui.config:setCurrentIndex(context.storage.cavebot.activeConfig)
-      parseConfig(context.storage.cavebot.configs[context.storage.cavebot.activeConfig])
-    end
+      ui.list:destroyChildren()
+
+      if context.storage.cavebot.activeConfig and context.storage.cavebot.configs[context.storage.cavebot.activeConfig] then
+        if mlState.currentConfigIndex ~= context.storage.cavebot.activeConfig then
+          mlState.currentConfigIndex = context.storage.cavebot.activeConfig
+          mlState.round = 0
+          mlState.history = {}
+          mlState.lastKnownExp = nil
+          mlState.lastKnownLevel = nil
+          resetRoundTracking()
+        end
+        ui.config:setCurrentIndex(context.storage.cavebot.activeConfig)
+        mlState.currentConfigName = getConfigName(context.storage.cavebot.configs[context.storage.cavebot.activeConfig])
+        parseConfig(context.storage.cavebot.configs[context.storage.cavebot.activeConfig])
+      end
     
     context.saveConfig()
     if scrollDown and ui.list:getLastChild() then
@@ -564,14 +1135,108 @@ Panel
           return true
         end
       end
-    end   
+      end,
+      getCommands = function()
+        return cloneCommandsList(commands)
+      end,
+      setCommands = function(newCommands, options)
+        return setCommandsFromList(newCommands, options)
+      end,
+      setConfig = function(configText, options)
+        return replaceActiveConfig(configText, options)
+      end,
+      applyOperations = function(ops, options)
+        return applyOperations(ops, options)
+      end,
+      getOptimizerState = function()
+        return {
+          enabled = mlState.enabled and registeredOptimizer ~= nil,
+          registered = registeredOptimizer ~= nil,
+          roundsPerUpdate = optimizerOptions.roundsPerUpdate,
+          round = mlState.round,
+          history = copyHistory(mlState.history),
+          lastRunRound = mlState.lastOptimizerRunRound,
+          lastRunAt = mlState.lastOptimizerRunAt,
+          totalMutations = mlState.totalMutations or 0,
+          currentConfigIndex = mlState.currentConfigIndex,
+          currentConfigName = mlState.currentConfigName,
+        }
+      end,
+      registerOptimizer = function(handler, options)
+        if type(handler) ~= "function" then
+          return false, "optimizer handler must be a function"
+        end
+        registeredOptimizer = handler
+        mlState.enabled = true
+        if type(options) == "table" then
+          if options.roundsPerUpdate then
+            optimizerOptions.roundsPerUpdate = math.max(1, math.floor(options.roundsPerUpdate))
+            mlState.roundsPerUpdate = optimizerOptions.roundsPerUpdate
+          end
+          if options.maxHistory then
+            optimizerOptions.maxHistory = math.max(1, math.floor(options.maxHistory))
+            mlState.maxHistory = optimizerOptions.maxHistory
+          end
+        end
+        return true
+      end,
+      unregisterOptimizer = function()
+        registeredOptimizer = nil
+        mlState.enabled = false
+      end,
+      setOptimizerEnabled = function(value)
+        mlState.enabled = value and true or false
+      end,
+      configureOptimizer = function(options)
+        if type(options) ~= "table" then
+          return false, "options must be a table"
+        end
+        if options.roundsPerUpdate then
+          optimizerOptions.roundsPerUpdate = math.max(1, math.floor(options.roundsPerUpdate))
+          mlState.roundsPerUpdate = optimizerOptions.roundsPerUpdate
+        end
+        if options.maxHistory then
+          optimizerOptions.maxHistory = math.max(1, math.floor(options.maxHistory))
+          mlState.maxHistory = optimizerOptions.maxHistory
+        end
+        return true
+      end,
+      getConfigText = function()
+        return getActiveConfigText()
+      end,
+      isOptimizerRegistered = function()
+        return registeredOptimizer ~= nil
+      end
   }
   
-  context.onContainerOpen(function(container)
-    if container:getItemsCount() > 0 then
-      lastOpenedContainer = context.now + container:getItemsCount() * 100
+    context.cavebot.panel = functions
+    context.cavebot.getCommands = functions.getCommands
+    context.cavebot.setCommands = functions.setCommands
+    context.cavebot.applyOperations = functions.applyOperations
+    context.cavebot.getConfigText = functions.getConfigText
+    context.cavebot.setConfig = functions.setConfig
+    context.cavebot.getOptimizerState = functions.getOptimizerState
+    context.cavebot.registerOptimizer = functions.registerOptimizer
+    context.cavebot.unregisterOptimizer = functions.unregisterOptimizer
+    context.cavebot.setOptimizerEnabled = functions.setOptimizerEnabled
+    context.cavebot.configureOptimizer = functions.configureOptimizer
+    context.cavebot.isOptimizerRegistered = functions.isOptimizerRegistered
+
+    context.cavebot.optimizer = context.cavebot.optimizer or {}
+    context.cavebot.optimizer.register = functions.registerOptimizer
+    context.cavebot.optimizer.unregister = functions.unregisterOptimizer
+    context.cavebot.optimizer.configure = functions.configureOptimizer
+    context.cavebot.optimizer.enable = functions.setOptimizerEnabled
+    context.cavebot.optimizer.disable = function()
+      functions.setOptimizerEnabled(false)
     end
-  end)
+    context.cavebot.optimizer.getState = functions.getOptimizerState
+
+    context.onContainerOpen(function(container)
+      if container:getItemsCount() > 0 then
+        lastOpenedContainer = context.now + container:getItemsCount() * 100
+      end
+    end)
 
   
   context.macro(250, function()
@@ -740,13 +1405,16 @@ Panel
         return
       end
     end
-        
-    local nextIndex = 1 + commandIndex % #commands    
-    local nextChild = ui.list:getChildByIndex(nextIndex)
-    if nextChild then
-      ui.list:focusChild(nextChild)
-      commandExecutionNo = 0
-    end
+
+      local nextIndex = 1 + commandIndex % #commands    
+      local nextChild = ui.list:getChildByIndex(nextIndex)
+      if nextChild then
+        if nextIndex == 1 then
+          onRoundComplete()
+        end
+        ui.list:focusChild(nextChild)
+        commandExecutionNo = 0
+      end
   end)
   
   return functions
