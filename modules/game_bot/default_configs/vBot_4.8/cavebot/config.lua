@@ -16,6 +16,13 @@ CaveBot.Config.setup = function()
   add("ignoreFields", "Ignore fields", false)  
   add("skipBlocked", "Skip blocked path", false)  
   add("useDelay", "Delay after use", 400)
+  add("mlOptimizerEnabled", "Enable ML optimizer", false)
+  add("mlOptimizerRoundInterval", "ML round interval", 5)
+  add("mlOptimizerEvaluationWindow", "ML evaluation window", 5)
+  add("mlOptimizerMinGain", "ML minimum gain (%)", 3)
+  add("mlOptimizerExploration", "ML exploration (%)", 25)
+  add("mlOptimizerJitter", "ML waypoint jitter", 2)
+  add("mlOptimizerMaxExtraWaypoints", "ML max extra waypoints", 3)
 end
 
 CaveBot.Config.show = function()

@@ -47,16 +47,19 @@ cavebotMacro = macro(20, function()
       CaveBot.resetWalking()
       return action.callback(value, actionRetries, prevActionResult)
     end)
-    if status then
-      if result == "retry" then
-        actionRetries = actionRetries + 1
-        retry = true
-      elseif type(result) == 'boolean' then
-        actionRetries = 0
-        prevActionResult = result
-      else
-        warn("Invalid return from cavebot action (" .. currentAction.action .. "), should be \"retry\", false or true, is: " .. tostring(result))
-      end
+      if status then
+        if result == "retry" then
+          actionRetries = actionRetries + 1
+          retry = true
+        elseif type(result) == 'boolean' then
+          actionRetries = 0
+          prevActionResult = result
+          if CaveBot.Extensions.MLOptimizer and CaveBot.Extensions.MLOptimizer.onActionEvaluated then
+            CaveBot.Extensions.MLOptimizer.onActionEvaluated(currentAction, result)
+          end
+        else
+          warn("Invalid return from cavebot action (" .. currentAction.action .. "), should be \"retry\", false or true, is: " .. tostring(result))
+        end
     else
       warn("warn while executing cavebot action (" .. currentAction.action .. "):\n" .. result)
     end    
@@ -68,17 +71,34 @@ cavebotMacro = macro(20, function()
     return
   end
   
-  if currentAction ~= ui.list:getFocusedChild() then
-    -- focused child can change durring action, get it again and reset state
-    currentAction = ui.list:getFocusedChild() or ui.list:getFirstChild()
-    actionRetries = 0
-    prevActionResult = true
-  end
-  local nextAction = ui.list:getChildIndex(currentAction) + 1
-  if nextAction > actions then
-    nextAction = 1
-  end
-  ui.list:focusChild(ui.list:getChildByIndex(nextAction))
+    if currentAction ~= ui.list:getFocusedChild() then
+      -- focused child can change durring action, get it again and reset state
+      currentAction = ui.list:getFocusedChild() or ui.list:getFirstChild()
+      actionRetries = 0
+      prevActionResult = true
+    end
+
+    local currentIndex = ui.list:getChildIndex(currentAction) or 0
+    local nextIndex = currentIndex + 1
+    local finishedRound = nextIndex > actions
+
+    if finishedRound then
+      if CaveBot.Extensions.MLOptimizer and CaveBot.Extensions.MLOptimizer.onRoundComplete then
+        CaveBot.Extensions.MLOptimizer.onRoundComplete()
+      end
+      actions = ui.list:getChildCount()
+      if actions == 0 then return end
+      nextIndex = 1
+    end
+
+    if nextIndex > actions or nextIndex < 1 then
+      nextIndex = 1
+    end
+
+    local nextChild = ui.list:getChildByIndex(nextIndex)
+    if nextChild then
+      ui.list:focusChild(nextChild)
+    end
 end)
 
 -- config, its callback is called immediately, data can be nil
