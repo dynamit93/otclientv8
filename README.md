@@ -54,6 +54,30 @@ In this repository, you can find clean, always up-to-date, ready to use version 
 ### Old tools, like updater and tutorials has been moved to: [OTCv8/otcv8-tools](https://github.com/OTCv8/otcv8-tools)
 ### There's github repo of tfs 1.3 with otclientv8 features: [OTCv8/otclientv8-tfs](https://github.com/OTCv8/forgottenserver)
 
+## ML CaveBot Optimizer
+
+The Cave tab now includes an **ML Waypoint Optimizer** panel that can be toggled on to let a machine-learning model adjust hunting routes while the cavebot is running. The optimizer collects live runtime data (round duration, experience per hour, active waypoint focus, etc.) every round and, by default, issues an optimization request every five rounds.
+
+- Configure an HTTPS endpoint that accepts a JSON payload and returns a `changes` array describing waypoint mutations (add/update/remove/move). Each change should declare a `type` (`add`, `update`, `remove`, `move`) plus the necessary fields (`action`, `value`, `index`, `from`, `to`, ...).
+- Only the operations enabled in the panel (add/update/remove/move) will be applied, and the number of mutations per cycle is restricted by the **Max changes per optimization** slider.
+- If no endpoint is provided you can register a local Lua callback on `CaveBot.Extensions.MLOptimizer.onOptimize(snapshot)` to experiment with on-device heuristics.
+- All applied changes are persisted immediately, logged under `storage.mlOptimizer.history`, and the bot resets its walking cache so the new route is used without manual intervention.
+
+Example response schema:
+
+```
+{
+  "changes": [
+    {"type": "update", "index": 5, "action": "goto", "value": "33211,32211,7"},
+    {"type": "move", "from": 3, "to": 6},
+    {"type": "add", "index": 7, "action": "label", "value": "hunt_restart"}
+  ],
+  "message": "Route adjusted for improved xp/h"
+}
+```
+
+Every optimizer run receives a rich telemetry payload (session id, runtime snapshot, waypoints snapshot, player metadata), making it straightforward to plug in remote ML services or A/B experiments that target better experience-per-hour.
+
 ## Quick Start for players
 
 Download whole repository and run one of binary file. 

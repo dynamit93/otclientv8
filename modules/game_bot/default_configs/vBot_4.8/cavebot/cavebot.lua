@@ -8,6 +8,107 @@ local ui = UI.createWidget("CaveBotPanel")
 ui.list = ui.listPanel.list -- shortcut
 CaveBot.actionList = ui.list
 
+CaveBot.Runtime = CaveBot.Runtime or {}
+local runtime = CaveBot.Runtime
+
+local function getCurrentExp()
+  if type(exp) == "function" then
+    local status, result = pcall(exp)
+    if status and type(result) == "number" then
+      return result
+    end
+  end
+
+  local localPlayer = g_game.getLocalPlayer and g_game.getLocalPlayer()
+  if localPlayer and localPlayer.getExperience then
+    return localPlayer:getExperience()
+  end
+
+  return runtime.lastExp or 0
+end
+
+local function resetRuntime(profileName)
+  local nowTick = now
+  runtime.profile = profileName
+  runtime.startTick = nowTick
+  runtime.roundStartTick = nowTick
+  runtime.rounds = 0
+  runtime.lastRoundDuration = nil
+  runtime.lastRoundExpGain = 0
+  runtime.lastRoundEndTick = nil
+  runtime.lastRoundNumber = 0
+  local currentExpValue = getCurrentExp()
+  runtime.startExp = currentExpValue
+  runtime.roundStartExp = currentExpValue
+  runtime.lastExp = currentExpValue
+  runtime.lastSnapshot = nil
+end
+
+local function buildRuntimeSnapshot()
+  local currentExpValue = getCurrentExp()
+  runtime.lastExp = currentExpValue
+  local nowTick = now
+  local elapsed = runtime.startTick and math.max(0, nowTick - runtime.startTick) or 0
+  local expGain = runtime.startExp and (currentExpValue - runtime.startExp) or 0
+  local expPerHour = elapsed > 0 and (expGain * 3600000) / elapsed or 0
+  local roundElapsed = runtime.roundStartTick and math.max(0, nowTick - runtime.roundStartTick) or 0
+
+  local snapshot = {
+    rounds = runtime.rounds or 0,
+    lastRoundDuration = runtime.lastRoundDuration,
+    lastRoundExpGain = runtime.lastRoundExpGain,
+    startTick = runtime.startTick,
+    roundStartTick = runtime.roundStartTick,
+    lastRoundEndTick = runtime.lastRoundEndTick,
+    expGain = expGain,
+    expPerHour = expPerHour,
+    currentExp = currentExpValue,
+    startExp = runtime.startExp,
+    roundElapsed = roundElapsed,
+    profile = runtime.profile,
+    timestamp = nowTick
+  }
+
+  runtime.lastSnapshot = snapshot
+  return snapshot
+end
+
+local function emitRoundComplete()
+  local currentExpValue = getCurrentExp()
+  local nowTick = now
+  local duration = runtime.roundStartTick and math.max(0, nowTick - runtime.roundStartTick) or 0
+
+  runtime.rounds = (runtime.rounds or 0) + 1
+  runtime.lastRoundDuration = duration
+  runtime.lastRoundExpGain = runtime.roundStartExp and (currentExpValue - runtime.roundStartExp) or 0
+  runtime.roundStartTick = nowTick
+  runtime.roundStartExp = currentExpValue
+  runtime.lastRoundEndTick = nowTick
+  runtime.lastRoundNumber = runtime.rounds
+  runtime.lastExp = currentExpValue
+
+  local snapshot = buildRuntimeSnapshot()
+
+  for extension, callbacks in pairs(CaveBot.Extensions) do
+    if type(callbacks.onRoundComplete) == "function" then
+      local status, err = pcall(callbacks.onRoundComplete, snapshot.rounds, snapshot.lastRoundDuration, snapshot)
+      if not status then
+        warn("warn while executing cavebot onRoundComplete (" .. tostring(extension) .. "):\n" .. err)
+      end
+    end
+  end
+end
+
+CaveBot.Runtime.reset = function(profileName)
+  resetRuntime(profileName)
+end
+
+CaveBot.Runtime.snapshot = function()
+  return buildRuntimeSnapshot()
+end
+
+resetRuntime()
+
 if CaveBot.Editor then
   CaveBot.Editor.setup()
 end
@@ -64,21 +165,29 @@ cavebotMacro = macro(20, function()
     warn("Invalid cavebot action: " .. currentAction.action)
   end
   
-  if retry then
-    return
-  end
-  
-  if currentAction ~= ui.list:getFocusedChild() then
-    -- focused child can change durring action, get it again and reset state
-    currentAction = ui.list:getFocusedChild() or ui.list:getFirstChild()
-    actionRetries = 0
-    prevActionResult = true
-  end
-  local nextAction = ui.list:getChildIndex(currentAction) + 1
-  if nextAction > actions then
-    nextAction = 1
-  end
-  ui.list:focusChild(ui.list:getChildByIndex(nextAction))
+    if retry then
+      return
+    end
+
+    if currentAction ~= ui.list:getFocusedChild() then
+      -- focused child can change durring action, get it again and reset state
+      currentAction = ui.list:getFocusedChild() or ui.list:getFirstChild()
+      actionRetries = 0
+      prevActionResult = true
+    end
+
+    local nextAction = ui.list:getChildIndex(currentAction) + 1
+    local wrapped = false
+    if nextAction > actions then
+      nextAction = 1
+      wrapped = true
+    end
+
+    ui.list:focusChild(ui.list:getChildByIndex(nextAction))
+
+    if wrapped then
+      emitRoundComplete()
+    end
 end)
 
 -- config, its callback is called immediately, data can be nil
@@ -125,8 +234,14 @@ config = Config.setup("cavebot_configs", configWidget, "cfg", function(name, ena
     end
   end
 
-  CaveBot.Config.onConfigChange(name, enabled, cavebotConfig)
-  
+    CaveBot.Config.onConfigChange(name, enabled, cavebotConfig)
+
+    if enabled then
+      resetRuntime(name)
+    else
+      runtime.lastSnapshot = nil
+    end
+
   actionRetries = 0
   CaveBot.resetWalking()
   prevActionResult = true
@@ -404,9 +519,13 @@ CaveBot.setCurrentProfile = function(name)
   CaveBot.setOn()
 end
 
-CaveBot.delay = function(value)
-  cavebotMacro.delay = math.max(cavebotMacro.delay or 0, now + value)
-end
+  CaveBot.delay = function(value)
+    cavebotMacro.delay = math.max(cavebotMacro.delay or 0, now + value)
+  end
+
+  CaveBot.getRuntime = function()
+    return CaveBot.Runtime.snapshot()
+  end
 
 CaveBot.gotoLabel = function(label)
   label = label:lower()
